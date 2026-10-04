@@ -65,6 +65,32 @@ communication modalities like querying, moving, sending and receiving files.
     # Load the pixel data to an RMagick image object and display it on screen (X):
     dcm.image.normalize.display
 
+### Convert RTSTRUCT contours to a mask
+
+Target geometry is supplied explicitly, so slices are located from patient
+coordinates rather than inferred from SOP instance or contour order. The
+returned mask is a nested Ruby Array with shape [frames, rows, columns].
+
+    result = DICOM::RTSTRUCTMask.from_rtstruct(rtstruct,
+      columns: 512,
+      rows: 512,
+      frames: 100,
+      position: image_position_patient,       # [x, y, z] of frame 0 voxel 0,0
+      orientation: image_orientation_patient, # 6 direction cosines
+      spacing: [column_spacing, row_spacing, frame_spacing],
+      tolerance: 0.5)
+    mask = result.mask
+    result.out_of_tolerance_contours.each { |contour| warn contour.inspect }
+
+Contours are sampled at voxel centers. Closed contours in one ROI are combined
+with XOR semantics, so inner contours create holes; different ROIs are unioned.
+At an exact boundary, the minimum row and interval-start column are covered,
+while the maximum row and interval-end column are not. Patient-coordinate
+contours can also be passed directly with `RTSTRUCTMask.convert`.
+
+Note that DICOM Pixel Spacing is ordered [row, column], while the explicit
+`:spacing` option above is ordered [column, row, frame].
+
 ### Transmit a DICOM file
 
     # Send a local file to a server (PACS) over the network:
