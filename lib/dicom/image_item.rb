@@ -114,6 +114,42 @@ module DICOM
       return bin
     end
 
+    # Encodes a raw pixel data binary string to one or more RLE encoded frames,
+    # following the RLE Lossless transfer syntax ("1.2.840.10008.1.2.5").
+    #
+    # The encoded data is organized as byte planes (segments) in accordance with
+    # the DICOM standard, PS3.5, Section 8.2.2 and Annex G. Each encoded frame
+    # carries its own 64 byte RLE header and is returned as a separate binary
+    # string (one encapsulated item per frame).
+    #
+    # @param [String] bin a binary string of unencoded pixel data
+    # @return [Array<String>] an array of RLE encoded frame strings
+    #
+    def encode_rle(bin)
+      raise ArgumentError, "Expected String, got #{bin.class}." unless bin.is_a?(String)
+      depth = bit_depth
+      unless [8, 16].include?(depth)
+        raise ArgumentError, "RLE encoding is only supported for a bit depth of 8 or 16, got #{depth}."
+      end
+      samples = (exists?('0028,0002') ? value('0028,0002').to_i : 1)
+      unless [1, 3].include?(samples)
+        raise ArgumentError, "RLE encoding is only supported for 1 or 3 samples per pixel, got #{samples}."
+      end
+      cols = num_cols.to_i
+      rows = num_rows.to_i
+      raise "Missing Columns and/or Rows Element. Unable to RLE encode pixel data." if cols <= 0 or rows <= 0
+      bytes_per_sample = depth / 8
+      frame_size = cols * rows * samples * bytes_per_sample
+      raise "The given pixel data (#{bin.length} bytes) does not match the expected size of #{num_frames} frame(s) (#{frame_size * num_frames} bytes)." unless bin.length == frame_size * num_frames
+      planar = (self['0028,0006'].is_a?(Element) ? value('0028,0006').to_i : 0)
+      frames = Array.new
+      num_frames.times do |frame_index|
+        frame_bin = bin.slice(frame_index * frame_size, frame_size)
+        frames << encode_rle_frame(frame_bin, cols, rows, bytes_per_sample, samples, planar)
+      end
+      return frames
+    end
+
     # Extracts a single image object, created from the encoded pixel data using
     # the image related elements in the DICOM object. If the object contains multiple
     # image frames, the first image frame is returned, unless the :frame option is used.
@@ -492,19 +528,15 @@ module DICOM
       # FIXME: Remove cols and rows (were only added for debugging).
       pixels = Array.new
       # RLE header specifying the number of segments:
-      header = string[0...64].unpack('L*')
+      header = string[0...64].unpack('L<*')
+      num_segments = header[0]
       image_segments = Array.new
-      # Extracting all start and endpoints of the different segments:
-      header.each_index do |n|
-        if n == 0
-          # This one need no processing.
-        elsif n == header[0]
-          # It's the last one
-          image_segments << [header[n], -1]
-          break
-        else
-          image_segments << [header[n], header[n + 1] - 1]
-        end
+      # Extract the start and endpoints of the different segments (the last
+      # segment ends where the frame string ends):
+      num_segments.times do |n|
+        start_position = header[n + 1]
+        end_position = (n == num_segments - 1) ? string.length : header[n + 2]
+        image_segments << [start_position, end_position]
       end
       # Iterate over each segment and extract pixel data:
       image_segments.each do |range|
@@ -512,13 +544,16 @@ module DICOM
         next_bytes = -1
         next_multiplier = 0
         # Iterate this segment's pixel string:
-        string[range[0]..range[1]].each_byte do |b|
+        string[range[0]...range[1]].each_byte do |b|
           if next_multiplier > 0
             next_multiplier.times { segment_data << b }
             next_multiplier = 0
           elsif next_bytes > 0
             segment_data << b
             next_bytes -= 1
+          elsif b == 128
+            # The no-op code. Used as padding at the end of an odd-length encoded row.
+            # (It produces no output.)
           elsif b <= 127
             next_bytes = b + 1
           else
@@ -533,6 +568,129 @@ module DICOM
         pixels += segment_data
       end
       return pixels
+    end
+
+    # Performs run length encoding of a single row of byte values.
+    #
+    # @param [Array<Integer>] row an array of byte values (0..255) for one row of one byte plane
+    # @return [String] the RLE encoded binary string of the row (without row padding)
+    #
+    def encode_rle_row(row)
+      out = String.new
+      i = 0
+      n = row.length
+      while i < n
+        # Search for a repeated run (a minimum of 2 equal bytes):
+        j = i + 1
+        j += 1 while j < n and j - i < 128 and row[j] == row[i]
+        run_length = j - i
+        if run_length >= 2
+          # A repeated run. The control byte is (257 - run length), which
+          # ranges from 255 (2 repeats) down to 129 (128 repeats):
+          out << (257 - run_length)
+          out << row[i]
+          i = j
+        else
+          # A literal run of non-repeated bytes (at most 128 bytes per packet):
+          start = i
+          i += 1
+          while i < n and (i - start) < 128
+            k = i + 1
+            k += 1 while k < n and k - i < 128 and row[k] == row[i]
+            break if k - i >= 2
+            i += 1
+          end
+          literal = row[start...i]
+          out << (literal.length - 1)
+          out << literal.pack('C*')
+        end
+      end
+      return out
+    end
+
+    # RLE encodes one complete frame of pixel data.
+    #
+    # The pixel data is split into byte planes (segments) according to the
+    # DICOM RLE conventions: Each byte of the unencoded pixel cell gives one
+    # segment, ordered from the most significant to the least significant byte.
+    # RLE runs never cross a row boundary within a segment.
+    #
+    # @param [String] frame_bin the unencoded binary pixel data of one frame
+    # @param [Integer] cols number of columns
+    # @param [Integer] rows number of rows
+    # @param [Integer] bytes_per_sample number of bytes per sample (1 or 2)
+    # @param [Integer] samples number of samples per pixel (1 or 3)
+    # @param [Integer] planar planar configuration of color pixel data (0 or 1)
+    # @return [String] the RLE encoded frame, including the 64 byte RLE header
+    #
+    def encode_rle_frame(frame_bin, cols, rows, bytes_per_sample, samples, planar)
+      pixel_count = cols * rows
+      # Extract the byte values of every sample (always little endian byte order):
+      if bytes_per_sample == 1
+        sample_bytes = [frame_bin.bytes]
+      else
+        words = frame_bin.unpack('S<*')
+        sample_bytes = [words.collect {|w| (w >> 8) & 255}, words.collect {|w| w & 255}]
+      end
+      # Order the byte planes as they shall appear in the RLE segments:
+      planes = Array.new
+      if samples == 1
+        bytes_per_sample.times {|byte_index| planes << sample_bytes[byte_index]}
+      elsif planar == 1
+        # Color by plane (R...R G...G B...B), most significant byte first:
+        bytes_per_sample.times do |byte_index|
+          samples.times do |sample_index|
+            start = sample_index * pixel_count
+            planes << sample_bytes[byte_index][start, pixel_count]
+          end
+        end
+      else
+        # Pixel interleaved (RGB RGB RGB ...), most significant byte first:
+        bytes_per_sample.times do |byte_index|
+          samples.times do |sample_index|
+            planes << sample_bytes[byte_index].each_slice(samples).collect {|group| group[sample_index]}
+          end
+        end
+      end
+      # Build the 64 byte RLE header (number of segments followed by up to 15 segment offsets):
+      num_segments = planes.length
+      header = Array.new(16, 0)
+      header[0] = num_segments
+      encoded_segments = Array.new
+      offset = 64
+      planes.each_with_index do |plane, index|
+        header[index + 1] = offset
+        encoded = String.new
+        rows.times do |row_index|
+          start = row_index * cols
+          encoded_row = encode_rle_row(plane[start, cols])
+          encoded << encoded_row
+          # RLE packets do not cross row boundaries. Pad odd encoded rows with the
+          # no-op control byte (128) so that each row ends on an even boundary:
+          encoded << 128.chr if encoded_row.length.odd?
+        end
+        encoded_segments << encoded
+        offset += encoded.length
+      end
+      return header.pack('L<*') + encoded_segments.join
+    end
+
+    # Encodes a raw pixel data binary string and builds the encapsulated pixel
+    # data elements used by the RLE Lossless transfer syntax: One parent Item
+    # carrying an empty basic offset table, followed by one Pixel Data Item per
+    # RLE encoded frame.
+    #
+    # @param [String] bin a binary string of unencoded pixel data
+    #
+    def write_rle_pixels(bin)
+      # A previously created pixel data element is replaced:
+      delete(PIXEL_TAG) if exists?(PIXEL_TAG)
+      sequence = Sequence.new(PIXEL_TAG, :name => ENCAPSULATED_PIXEL_NAME, :vr => 'OB', :parent => self)
+      # Basic offset table item (empty, i.e. a single encapsulated item of zero length):
+      offset_item = Item.new(:length => 0, :parent => sequence)
+      encode_rle(bin).each do |frame|
+        Item.new(:bin => frame, :name => PIXEL_ITEM_NAME, :vr => 'OB', :parent => offset_item)
+      end
     end
 
     # Gives the value from the "Photometric Interpretation" Element.
@@ -824,6 +982,10 @@ module DICOM
     # @param [String] bin a binary string containing encoded pixel data
     #
     def write_pixels(bin)
+      if self.is_a?(DObject) and transfer_syntax == TXS_RLE
+        write_rle_pixels(bin)
+        return
+      end
       if self.exists?(PIXEL_TAG)
         # Update existing Data Element:
         self[PIXEL_TAG].bin = bin
