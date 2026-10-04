@@ -172,6 +172,29 @@ module DICOM
       elements.each do |element|
         # If this particular element has children, write these (recursively) before proceeding with elements at the current level:
         if element.is_parent?
+          if @enc_image &&
+            element.is_a?(Item) &&
+            element.parent.is_a?(Item) &&
+            element.parent.parent.is_a?(DObject) &&
+            element.parent.parent[PIXEL_TAG].is_a?(Sequence)
+            # A carried frame item is written directly as a child of Pixel Data, not as a child item of the Basic Offset Table.
+            write_data_element(element)
+            next
+          end
+          if @enc_image && element.is_a?(Item) && element.parent.is_a?(Sequence) &&
+            element.parent.tag == PIXEL_TAG && element.index == 0
+            # The Basic Offset Table is always an item with an explicit zero length:
+            write_tag(ITEM_TAG)
+            write_vr_length(ITEM_TAG, ITEM_VR, 0)
+            element.children.each { |item| write_data_element(item) }
+            next
+          end
+          if @enc_image && element.tag == PIXEL_TAG && element.children.first
+            basic_offset_table = element.children.first
+            write_data_element(basic_offset_table)
+            write_delimiter(element)
+            next
+          end
           if element.children?
             # Sequence/Item with child elements:
             element.reset_length unless @enc_image

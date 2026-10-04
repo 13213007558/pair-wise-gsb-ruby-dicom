@@ -669,3 +669,166 @@ module DICOM
   end
 
 end
+module DICOM
+  describe ImageItem, '#rle' do
+
+    before :example do
+      DICOM.logger = Logger.new(nil)
+    end
+
+    def rle_dcm(columns: 3, rows: 2, frames: 1, samples: 1, depth: 8,
+                representation: 0, photometry: 'MONOCHROME2', planar: nil)
+      dcm = DObject.new
+      Element.new('0002,0010', TXS_RLE, :parent => dcm)
+      Element.new('0028,0002', samples, :parent => dcm)
+      Element.new('0028,0004', photometry, :parent => dcm)
+      Element.new('0028,0006', planar, :parent => dcm) unless planar.nil?
+      Element.new('0028,0008', frames, :parent => dcm) if frames > 1
+      Element.new('0028,0010', rows, :parent => dcm)
+      Element.new('0028,0011', columns, :parent => dcm)
+      Element.new('0028,0100', depth, :parent => dcm)
+      Element.new('0028,0103', representation, :parent => dcm)
+      dcm
+    end
+
+    describe '#encode_rle' do
+
+      it 'encodes literals, a short run, and row boundaries in an 8-bit monochrome frame' do
+        dcm = rle_dcm(:columns => 3, :rows => 3)
+        frame = dcm.encode_rle([1, 1, 2, 3, 4, 5, 6, 7, 8]).first
+
+        expect(frame[0, 64].unpack('V16').first(2)).to eql [1, 64]
+        expect(frame[64..-1].unpack1('H*')).to eql 'ff0100020203040502060708'
+        expect(dcm.send(:decode_rle, 3, 3, frame)).to eql [1, 1, 2, 3, 4, 5, 6, 7, 8]
+      end
+
+      it 'encodes a run of 128 without combining bytes from the next row' do
+        dcm = rle_dcm(:columns => 129, :rows => 2)
+        pixels = Array.new(128, 7) + [8] + Array.new(129, 9)
+        frame = dcm.encode_rle(pixels).first
+
+        expect(frame[64, 8].unpack1('H*')).to eql '8107000881090009'
+        expect(dcm.send(:decode_rle, 129, 2, frame)).to eql pixels
+      end
+
+      it 'splits a run of 129 at the maximum RLE run length' do
+        dcm = rle_dcm(:columns => 129, :rows => 1)
+        pixels = Array.new(129, 7)
+        frame = dcm.encode_rle(pixels).first
+
+        expect(frame[64, 4].unpack1('H*')).to eql '81070007'
+        expect(dcm.send(:decode_rle, 129, 1, frame)).to eql pixels
+      end
+
+      it 'encodes 8-bit signed negative pixel values' do
+        dcm = rle_dcm(:columns => 2, :rows => 1, :representation => 1)
+        pixels = [-128, -1]
+        frame = dcm.encode_rle(pixels).first
+
+        expect(frame[64, 4].unpack1('H*')).to eql '0180ff00'
+        expect(dcm.send(:decode_rle, 2, 1, frame)).to eql pixels
+      end
+
+      it 'encodes 16-bit unsigned pixel values' do
+        dcm = rle_dcm(:columns => 2, :rows => 1, :depth => 16)
+        pixels = [256, 255]
+        frame = dcm.encode_rle(pixels).first
+
+        expect(dcm.send(:decode_rle, 2, 1, frame)).to eql pixels
+      end
+
+      it 'encodes 16-bit signed pixels as high and low byte planes in RLE order' do
+        dcm = rle_dcm(:columns => 2, :rows => 2, :depth => 16, :representation => 1)
+        pixels = [-32768, -1, 256, 255]
+        frame = dcm.encode_rle(pixels).first
+
+        expect(frame[0, 64].unpack('V16').first(3)).to eql [2, 64, 70]
+        expect(frame[64, 6].unpack1('H*')).to eql '0180ff010100'
+        expect(frame[70, 6].unpack1('H*')).to eql '0100ff0100ff'
+        expect(dcm.send(:decode_rle, 2, 2, frame)).to eql pixels
+      end
+
+      it 'encodes 16-bit rows with an odd byte plane length' do
+        dcm = rle_dcm(:columns => 2, :rows => 2, :depth => 16, :representation => 1)
+        pixels = [-32768, -1, 0, 0]
+        frame = dcm.encode_rle(pixels).first
+
+        expect(frame[0, 64].unpack('V16').first(3)).to eql [2, 64, 69]
+        expect(frame[64, 5].unpack1('H*')).to eql '0180ffff00'
+        expect(frame[69, 5].unpack1('H*')).to eql '0100ffff00'
+        expect(dcm.send(:decode_rle, 2, 2, frame)).to eql pixels
+      end
+
+      it 'encodes RGB byte planes in red, green, blue order' do
+        dcm = rle_dcm(:columns => 3, :rows => 1, :samples => 3, :photometry => PI_RGB, :planar => 1)
+        pixels = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        frame = dcm.encode_rle(pixels).first
+
+        expect(frame[0, 64].unpack('V16').first(4)).to eql [3, 64, 68, 72]
+        expect(frame[64, 12].unpack1('H*')).to eql '020102030204050602070809'
+        expect(dcm.send(:decode_rle, 3, 1, frame)).to eql pixels
+      end
+
+      it 'encodes 16-bit RGB values in six byte planes' do
+        dcm = rle_dcm(:columns => 1, :rows => 1, :samples => 3, :depth => 16,
+                      :photometry => PI_RGB, :planar => 1)
+        pixels = [256, 255, 1]
+        frame = dcm.encode_rle(pixels).first
+
+        expect(frame[0, 64].unpack('V16').first(7)).to eql [6, 64, 66, 68, 70, 72, 74]
+        expect(frame[64, 12].unpack1('H*')).to eql '00010000000000ff00000001'
+        expect(dcm.send(:decode_rle, 1, 1, frame)).to eql pixels
+      end
+
+      it 'rearranges pixel-interleaved RGB data to planar order before RLE encoding' do
+        dcm = rle_dcm(:columns => 3, :rows => 1, :samples => 3, :photometry => PI_RGB, :planar => 0)
+        pixels = [1, 4, 7, 2, 5, 8, 3, 6, 9]
+        dcm.expects(:decompress).never
+        dcm.expects(:export_pixels).never
+
+        frame = dcm.encode_rle(dcm.tap { |object| object.pixels = pixels }.pixels).first
+
+        expect(dcm.value('0028,0006')).to eql 1
+        expect(dcm.send(:decode_rle, 3, 1, frame)).to eql [1, 2, 3, 4, 5, 6, 7, 8, 9]
+      end
+
+    end
+
+    describe '#pixels=' do
+
+      it 'stores one encapsulated RLE item per frame' do
+        dcm = rle_dcm(:columns => 3, :rows => 2, :frames => 2)
+        pixels = [1, 1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10]
+        dcm.pixels = pixels
+
+        sequence = dcm[PIXEL_TAG]
+        expect(sequence).to be_a(Sequence)
+        expect(sequence[0].children.length).to eql 2
+        expect(dcm.image_strings(true).length).to eql 2
+        expect(dcm.send(:decode_rle, 3, 2, dcm.image_strings(true)[0])).to eql pixels[0, 6]
+        expect(dcm.send(:decode_rle, 3, 2, dcm.image_strings(true)[1])).to eql pixels[6, 6]
+      end
+
+      it 'writes and reads back encapsulated multi-frame RLE data through DObject#write' do
+        path = TMPDIR + 'rle.dcm'
+        dcm = rle_dcm(:columns => 3, :rows => 3, :frames => 2)
+        pixels = [1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 10, 11, 12, 13, 14, 15, 16]
+        dcm.pixels = pixels
+        dcm.write(path)
+        encoded = File.binread(path)
+        pixel_tag = [0xe0, 0x7f, 0x10, 0x00].pack('C4')
+        position = encoded.index(pixel_tag)
+        expect(encoded[position + 12, 8].unpack1('H*')).to eql 'feff00e000000000'
+        expect(encoded[position + 20, 8].unpack1('H*')).to eql 'feff00e04c000000'
+
+        read_dcm = DObject.read(path)
+        expect(read_dcm.compression?).to be_truthy
+        expect(read_dcm.image_strings(true).length).to eql 2
+        expect(read_dcm.send(:decode_rle, 3, 3, read_dcm.image_strings(true)[0])).to eql pixels[0, 9]
+        expect(read_dcm.send(:decode_rle, 3, 3, read_dcm.image_strings(true)[1])).to eql pixels[9, 9]
+      end
+
+    end
+
+  end
+end
