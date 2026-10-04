@@ -39,6 +39,26 @@ module DICOM
   # Explicit, big endian transfer syntax.
   EXPLICIT_BIG_ENDIAN = "1.2.840.10008.1.2.2"
 
+  # Media Storage Directory Storage SOP class (DICOMDIR).
+  MEDIA_STORAGE_DIRECTORY_SOP_CLASS = "1.2.840.10008.1.3.10"
+
+  # File set related tags of a DICOMDIR file:
+  FILE_SET_ID_TAG = "0004,1130"                            # File-set ID
+  ROOT_RECORD_FIRST_TAG = "0004,1200"                     # Offset of the First Directory Record of the Root Directory Entity
+  ROOT_RECORD_LAST_TAG = "0004,1202"                      # Offset of the Last Directory Record of the Root Directory Entity
+  FILE_SET_CONSISTENCY_TAG = "0004,1212"                   # File-set Consistency Flag
+  DIRECTORY_RECORD_SEQUENCE_TAG = "0004,1220"              # Directory Record Sequence
+  DIRECTORY_RECORD_NEXT_TAG = "0004,1400"                  # Offset of the Next Directory Record
+  DIRECTORY_RECORD_IN_USE_TAG = "0004,1410"                # Record In-use Flag
+  DIRECTORY_RECORD_LOWER_TAG = "0004,1420"                 # Offset of Referenced Lower-Level Directory Entity
+  DIRECTORY_RECORD_TYPE_TAG = "0004,1430"                  # Directory Record Type
+  REFERENCED_FILE_ID_TAG = "0004,1500"                     # Referenced File ID
+  REFERENCED_SOP_CLASS_UID_TAG = "0004,1510"               # Referenced SOP Class UID in File
+  REFERENCED_SOP_INSTANCE_UID_TAG = "0004,1511"            # Referenced SOP Instance UID in File
+
+  # Separator between components of a Referenced File ID (DICOM PS3.10, Section 7).
+  COMPONENT_SEPARATOR = "\\"
+
   # Verification SOP class UID.
   VERIFICATION_SOP = "1.2.840.10008.1.1"
   # Application context SOP class UID.
@@ -210,4 +230,3 @@ module DICOM
   VALUE_CONVERSION.default = :to_s
 
 end
-
