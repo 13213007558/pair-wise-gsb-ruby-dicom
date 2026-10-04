@@ -19,6 +19,10 @@ module DICOM
   # The VR used for the item elements.
   ITEM_VR = "  "
 
+  # Header size (bytes) of an Item and an explicit VR, defined length sequence.
+  ITEM_HEADER_LENGTH = 8
+  SQ_HEADER_LENGTH = 12
+
   # Pixel tag.
   PIXEL_TAG = "7FE0,0010"
   # Name of the pixel tag when holding encapsulated data.
@@ -28,6 +32,29 @@ module DICOM
 
   # File meta group.
   META_GROUP = "0002"
+
+  # File-set related tags (DICOMDIR, PS3.10 Annex F).
+  FILE_SET_ID_TAG = "0004,1130"                                  # File-set ID
+  FILE_SET_DESCRIPTOR_TAG = "0004,1141"                          # File-set Descriptor File ID
+  FILE_SET_CHARACTER_SET_TAG = "0004,1142"                      # Specific Character Set of File-set Descriptor File
+  FIRST_ROOT_RECORD_TAG = "0004,1200"                           # Offset of the First Directory Record of the Root Directory Entity
+  LAST_ROOT_RECORD_TAG = "0004,1202"                            # Offset of the Last Directory Record of the Root Directory Entity
+  FILE_SET_CONSISTENCY_TAG = "0004,1212"                        # File-set Consistency Flag
+  FILE_SET_INFO_SEQUENCE_TAG = "0004,1230"                      # File-set Information Sequence
+  DIRECTORY_RECORD_SEQUENCE_TAG = "0004,1220"                   # Directory Record Sequence
+  NEXT_RECORD_TAG = "0004,1400"                                 # Offset of the Next Directory Record
+  RECORD_IN_USE_TAG = "0004,1410"                               # Record In-use Flag
+  LOWER_LEVEL_RECORD_TAG = "0004,1420"                          # Offset of Referenced Lower-Level Directory Entity
+  RECORD_TYPE_TAG = "0004,1430"                                 # Directory Record Type
+  PRIVATE_RECORD_UID_TAG = "0004,1432"                          # Private Record UID
+  REFERENCED_FILE_ID_TAG = "0004,1500"                          # Referenced File ID
+  MRDR_RECORD_OFFSET_TAG = "0004,1504"                          # MRDR Directory Record Offset
+  REFERENCED_SOP_CLASS_UID_TAG = "0004,1510"                    # Referenced SOP Class UID in File
+  REFERENCED_SOP_INSTANCE_UID_TAG = "0004,1511"                 # Referenced SOP Instance UID in File
+  REFERENCED_TRANSFER_SYNTAX_TAG = "0004,1512"                  # Referenced Transfer Syntax UID in File
+
+  # Media Storage Directory SOP Class (the SOP Class UID identifying a DICOMDIR).
+  MEDIA_STORAGE_DIRECTORY_SOP_CLASS = "1.2.840.10008.1.3.10"
 
   # Group length element.
   GROUP_LENGTH = "0000"
@@ -210,4 +237,3 @@ module DICOM
   VALUE_CONVERSION.default = :to_s
 
 end
-

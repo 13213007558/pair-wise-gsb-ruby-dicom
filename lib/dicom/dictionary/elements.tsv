@@ -63,6 +63,7 @@
 0004,1202	Offset of the Last Directory Record of the Root Directory Entity	UL	1	
 0004,1212	File-set Consistency Flag	US	1	
 0004,1220	Directory Record Sequence	SQ	1	
+0004,1230	File-set Information Sequence	SQ	1	
 0004,1400	Offset of the Next Directory Record	UL	1	
 0004,1410	Record In-use Flag	US	1	
 0004,1420	Offset of Referenced Lower-Level Directory Entity	UL	1	

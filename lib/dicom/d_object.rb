@@ -105,6 +105,12 @@ module DICOM
       dcm = self.new
       dcm.send(:read, string, signature, :overwrite => options[:overwrite], :syntax => options[:syntax])
       if dcm.read?
+        # A DICOM object whose Media Storage SOP Class identifies the Media
+        # Storage Directory is converted to a DicomDir instance so that its
+        # directory tree can be inspected and edited.
+        if self == DObject && dcm.value("0002,0002") == MEDIA_STORAGE_DIRECTORY_SOP_CLASS
+          dcm = DicomDir.send(:from_dcm, dcm, string)
+        end
         logger.debug("DICOM string successfully parsed.")
       else
         logger.warn("Failed to parse this string as DICOM.")

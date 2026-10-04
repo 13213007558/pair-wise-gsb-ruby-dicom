@@ -65,6 +65,27 @@ communication modalities like querying, moving, sending and receiving files.
     # Load the pixel data to an RMagick image object and display it on screen (X):
     dcm.image.normalize.display
 
+### Read and edit a DICOMDIR
+
+    # A DICOMDIR is automatically detected when read/parsed (it is returned as a DicomDir):
+    dir = DICOM::DicomDir.read("DICOMDIR")
+    # The flat Directory Record Sequence is rebuilt as an editable directory tree:
+    dir.records.each do |patient|
+      patient.children.each do |study|
+        # Insert or delete records as needed (subtrees are moved/removed as a whole):
+        # patient.delete(study)
+        # study.add_record("SERIES")
+      end
+    end
+    # The Referenced File ID is a sequence of file-set components (backslash
+    # separated in the file), not an operating system path:
+    image = dir.records_by_type("IMAGE").first
+    components = image.file_id            # e.g. ["STUDY", "SERIES", "IMAGE"]
+    image.file_id = ["STUDY", "SERIES", "NEW"]
+    # On writing, all next/lower-level and root record offsets are recalculated
+    # to match the new physical record layout:
+    dir.write("DICOMDIR")
+
 ### Transmit a DICOM file
 
     # Send a local file to a server (PACS) over the network:

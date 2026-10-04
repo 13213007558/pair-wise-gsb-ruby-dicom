@@ -1,5 +1,12 @@
 # 0.9.8
 
+## Unreleased
+
+* Added: DicomDir class for reading, editing and writing DICOMDIR files. The Directory Record Sequence (0004,1220) is rebuilt into an editable directory tree of DirectoryRecord instances linked by next/lower-level offsets.
+* Added: Insertion and deletion of directory records (including whole subtrees), with the next directory record offset (0004,1400), lower-level entity offset (0004,1420) and root entity offsets (0004,1200/0004,1202) recalculated on write.
+* Added: Referenced File ID (0004,1500) exposed as a file-set component sequence (joined with the DICOM backslash separator) rather than an operating system path.
+* Added: Automatic detection of DICOMDIR files (Media Storage Directory SOP Class 1.2.840.10008.1.3.10) in DObject.read/parse, returning a DicomDir instance.
+
 ## 24th March, 2018
 
 * Changed: Replaced Fixnum with Integer to avoid deprecation warning in Ruby 2.4.

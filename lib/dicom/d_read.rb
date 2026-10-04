@@ -218,7 +218,6 @@ module DICOM
       # make sure that it makes it into the object:
       if options[:syntax]
         @transfer_syntax = options[:syntax]
-        Element.new("0002,0010", options[:syntax], :parent => self) if self.is_a?(DObject)
       end
       # Check for header information if indicated:
       if signature
@@ -253,6 +252,13 @@ module DICOM
           # Explain the failure as an error:
           logger.error("Parsing a Data Element has failed. This is likely caused by an invalid DICOM encoding.")
         end
+      end
+      # If a transfer syntax was forced for a header-less (meta-less) string,
+      # make sure it is reflected as an element of the DICOM object. This is
+      # done after parsing to avoid creating a duplicate if the string itself
+      # happened to contain a transfer syntax element.
+      if options[:syntax] && self.is_a?(DObject) && !exists?("0002,0010")
+        Element.new("0002,0010", options[:syntax], :parent => self)
       end
     end
 
