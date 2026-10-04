@@ -239,6 +239,37 @@ module DICOM
       return strings
     end
 
+    # Gives the encoded byte string for one frame of encapsulated Pixel Data.
+    #
+    # Frame fragments are assembled in their original order, but the encoded
+    # pixel data is not decompressed. Frame boundaries are taken from the
+    # Extended Offset Table when present, otherwise the Basic Offset Table is
+    # used. If the Basic Offset Table is empty, boundaries are detected only
+    # for transfer syntaxes whose frame headers can be reliably identified.
+    #
+    # @param [Integer] index zero-based frame index
+    # @param [IO, NilClass] io source byte stream positioned independently from the parsed DICOM object
+    # @return [String, NilClass] the encoded frame bytes, or nil if the frame boundary cannot be located
+    #
+    def frame_bytes(index, io=nil)
+      pixel_element = self[PIXEL_TAG]
+      return nil unless pixel_element.is_a?(Sequence) && index.is_a?(Integer) && index >= 0
+      bot_item = pixel_element[0]
+      fragments = encapsulated_fragments(bot_item)
+      return nil if fragments.empty?
+
+      eot = self[EXTENDED_OFFSET_TABLE_TAG]
+      if eot && eot.bin.bytesize >= 8
+        bytes_from_extended_offset_table(index, eot, fragments, io)
+      else
+        boundaries = basic_offset_boundaries(bot_item, fragments)
+        return nil if boundaries.nil?
+        boundaries = scan_frame_boundaries(fragments) if boundaries.empty?
+        return nil if boundaries.empty? || index >= boundaries.length
+        bytes_for_boundary(boundaries[index], boundaries[index + 1], fragments, io)
+      end
+    end
+
     # Dumps the binary content of the Pixel Data element to the specified file.
     #
     # If the DICOM object contains multi-fragment pixel data, each fragment
@@ -450,6 +481,229 @@ module DICOM
 
 
     private
+
+    # Reads an exact number of bytes from an IO-like object.
+    #
+    def exact_io_bytes(io, length)
+      bytes = io.read(length)
+      return nil unless bytes && bytes.bytesize == length
+      return bytes
+    end
+
+    # Gives all pixel data fragments beneath the Basic Offset Table item.
+    #
+    def encapsulated_fragments(bot_item)
+      return [] unless bot_item && bot_item.respond_to?(:children)
+      bot_item.children.select { |child| child.is_a?(Item) }
+    end
+
+    # Assembles one frame from memory using fragment index boundaries.
+    #
+    def assemble_fragment_range(fragments, first_index, last_index, target_length=nil)
+      return nil if first_index.nil? || first_index >= fragments.length
+      last_index ||= fragments.length
+      bytes = fragments[first_index...last_index].each_with_index.map do |fragment, relative_index|
+        fragment_index = first_index + relative_index
+        fragment.bin.to_s.byteslice(0, fragment.length)
+      end.join
+      bytes = bytes.byteslice(0, target_length) if target_length
+      return bytes
+    end
+
+    # Locates frames using a Basic Offset Table. The returned array contains
+    # the fragment index where each frame starts, with a final nil sentinel.
+    #
+    def basic_offset_boundaries(bot_item, fragments)
+      table = offset_table_values(bot_item)
+      return [] if table.empty?
+      positions = fragment_positions(bot_item, fragments)
+      boundaries = table.map do |offset|
+        return nil if offset == 0xFFFFFFFF
+        positions.index(offset)
+      end
+      return nil unless boundaries.all? && boundaries == boundaries.uniq && boundaries.each_cons(2).all? { |a, b| a < b }
+      return boundaries
+    end
+
+    # Gives the offset position of each fragment item.
+    #
+    def fragment_positions(bot_item, fragments)
+      base = offset_table_base_position(bot_item)
+      if base && fragments.all? { |fragment| fragment.source_position }
+        return fragments.map { |fragment| fragment.source_position - base }
+      end
+      positions = []
+      position = 0
+      fragments.each do |fragment|
+        positions << position
+        position += fragment.length + 8
+      end
+      return positions
+    end
+
+    # Gives the position immediately following a Basic Offset Table item.
+    # Basic Offset Table values use this as their zero offset.
+    #
+    def offset_table_base_position(bot_item)
+      return nil unless bot_item.source_position
+      table_length = bot_item.bin ? bot_item.bin.bytesize : 0
+      return bot_item.source_position + 8 + table_length
+    end
+
+    # Gives the unsigned 32-bit values of a Basic Offset Table.
+    #
+    def offset_table_values(bot_item)
+      return [] unless bot_item.bin && bot_item.bin.bytesize.even? && (bot_item.bin.bytesize % 4).zero?
+      return bot_item.bin.unpack('V*')
+    end
+
+    # Reads item payloads from an IO-like source until a target payload size
+    # or an absolute end position has been reached.
+    #
+    def read_frame_from_io(io, start_position, end_position=nil, target_length=nil)
+      position = start_position
+      io.seek(position)
+      payload = String.new.force_encoding(Encoding::BINARY)
+      loop do
+        tag = exact_io_bytes(io, 4)
+        return nil unless tag == "\xFE\xFF\x00\xE0".b
+        length_bytes = exact_io_bytes(io, 4)
+        return nil unless length_bytes
+        item_length = length_bytes.unpack('V').first
+        return nil if item_length < 0 || item_length.odd?
+        item_payload = exact_io_bytes(io, item_length)
+        return nil unless item_payload
+        position += 8 + item_length
+        payload << item_payload
+        payload = payload.byteslice(0, target_length) if target_length && payload.bytesize >= target_length
+        finished_by_length = target_length && payload.bytesize == target_length
+        finished_by_position = end_position && position >= end_position
+        return payload if finished_by_length || finished_by_position
+        return nil if io.respond_to?(:eof?) && io.eof?
+      end
+    end
+
+    # Detects whether a payload begins a frame for a transfer syntax whose
+    # frame boundaries can be found without an offset table.
+    #
+    def reliable_frame_start?(bin)
+      syntax = encapsulated_transfer_syntax.to_s
+      jpeg_2000_syntaxes = [
+        TXS_JPEG_2000_PART1_LOSSLESS,
+        TXS_JPEG_2000_PART1_LOSSLESS_OR_LOSSY,
+        TXS_JPEG_2000_PART2_LOSSLESS,
+        TXS_JPEG_2000_PART2_LOSSLESS_OR_LOSSY,
+        TXS_JPEG_HS_LOSSLESS,
+        TXS_JPEG_HS_LOSSY
+      ]
+      if jpeg_2000_syntaxes.include?(syntax)
+        return bin.bytesize >= 4 && bin.byteslice(0, 4) == "\xFF\x4F\xFF\x51".b
+      elsif [TXS_JPEG_BASELINE, TXS_JPEG_EXTENDED, TXS_JPEG_LOSSLESS_NH,
+             TXS_JPEG_LOSSLESS_NH_FOP, TXS_JPEG_LS_LOSSLESS,
+             TXS_JPEG_LS_NEAR_LOSSLESS].include?(syntax) && bin.bytesize >= 2
+        return bin.byteslice(0, 2) == "\xFF\xD8".b
+      elsif syntax == TXS_RLE
+        return valid_rle_header?(bin)
+      else
+        return false
+      end
+    end
+
+    # Finds frame boundaries from recognizable frame headers in the fragments.
+    #
+    def scan_frame_boundaries(fragments)
+      return [] unless fragments.any? && reliable_frame_start?(fragments.first.bin.to_s)
+      boundaries = []
+      fragments.each_index do |index|
+        boundaries << index if reliable_frame_start?(fragments[index].bin.to_s)
+      end
+      return boundaries
+    end
+
+    # Gives the transfer syntax for encapsulated pixel data located in an item.
+    #
+    def encapsulated_transfer_syntax
+      return transfer_syntax if is_a?(DObject)
+      top = top_parent
+      if top.respond_to?(:transfer_syntax)
+        return top.transfer_syntax
+      else
+        return @transfer_syntax
+      end
+    end
+
+    # Validates the most important constraints of an RLE header.
+    #
+    def valid_rle_header?(bin)
+      return false if bin.bytesize < 64
+      header = bin.byteslice(0, 64).unpack('V*')
+      segments = header.first
+      return false unless segments >= 1 && segments <= 15
+      offsets = header[1..segments]
+      return offsets.first == 64 && offsets == offsets.sort && offsets.all? { |offset| offset <= bin.bytesize }
+    end
+
+    # Builds one frame from fragment index boundaries, reading directly from IO
+    # when fragment payloads have not been retained in memory.
+    #
+    def bytes_for_boundary(first_index, next_index, fragments, io)
+      return nil if first_index.nil?
+      if io && fragments[first_index]&.source_position
+        start_position = fragments[first_index].source_position
+        end_position = next_index && fragments[next_index] ? fragments[next_index].source_position : nil
+        bytes = read_frame_from_io(io, start_position, end_position)
+        return bytes if bytes
+      end
+      return assemble_fragment_range(fragments, first_index, next_index)
+    end
+
+    # Locates and assembles a frame using an Extended Offset Table.
+    #
+    def bytes_from_extended_offset_table(index, eot, fragments, io)
+      offsets = eot.bin.unpack('Q<*')
+      return nil if offsets.length.zero? || index >= offsets.length
+      lengths_element = self[EXTENDED_OFFSET_TABLE_LENGTHS_TAG]
+      lengths = lengths_element && lengths_element.bin.bytesize >= 4 ? lengths_element.bin.unpack('V*') : []
+      return nil unless lengths.empty? || lengths.length == offsets.length
+      target_length = lengths[index] if index < lengths.length
+      bot_item = encapsulated_bot_item
+      positions = extended_fragment_positions(bot_item, fragments)
+      relative_offsets = offsets.map { |value| value - bot_item.source_position }
+      first_index = positions.index(relative_offsets[index]) if bot_item.source_position && relative_offsets.all? { |value| value >= 0 }
+      if first_index
+        next_offset = relative_offsets[index + 1]
+        next_index = next_offset ? positions.index(next_offset) : nil
+        return assemble_fragment_range(fragments, first_index, next_index, target_length)
+      elsif io
+        return read_frame_from_io(io, offsets[index], nil, target_length)
+      else
+        return nil
+      end
+    end
+
+    # Gives the Basic Offset Table item belonging to encapsulated Pixel Data.
+    #
+    def encapsulated_bot_item
+      self[PIXEL_TAG][0]
+    end
+
+    # Gives fragment positions relative to the Basic Offset Table item start.
+    # These values are used to compare against source-relative Extended Offset
+    # Table values when assembling data already held in memory.
+    #
+    def extended_fragment_positions(bot_item, fragments)
+      if bot_item.source_position && fragments.all? { |fragment| fragment.source_position }
+        return fragments.map { |fragment| fragment.source_position - bot_item.source_position }
+      end
+      table_length = bot_item.bin ? bot_item.bin.bytesize : 0
+      positions = []
+      position = 8 + table_length
+      fragments.each do |fragment|
+        positions << position
+        position += fragment.length + 8
+      end
+      return positions
+    end
 
 
     # Gives the effective bit depth of the pixel data (considers a special case

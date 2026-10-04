@@ -6,6 +6,43 @@ require 'numo/narray'
 
 module DICOM
 
+  class AddressableFakeIO
+
+    def initialize(blocks)
+      @blocks = blocks.sort_by(&:first)
+      @position = 0
+      @seeks = []
+    end
+
+    attr_reader :seeks
+
+    def eof?
+      false
+    end
+
+    def seek(position)
+      @position = position
+      @seeks << position
+    end
+
+    def read(length)
+      bytes = String.new.force_encoding(Encoding::BINARY)
+      remaining = length
+      while remaining > 0
+        block = @blocks.find { |start, data| @position >= start && @position < start + data.bytesize }
+        return nil unless block
+        start, data = block
+        available = start + data.bytesize - @position
+        chunk = data.byteslice(@position - start, [remaining, available].min)
+        bytes << chunk
+        @position += chunk.bytesize
+        remaining -= chunk.bytesize
+      end
+      return bytes
+    end
+
+  end
+
   describe ImageItem do
 
     before :context do
@@ -485,6 +522,130 @@ module DICOM
         frames_used = 8
         dcm.add(Element.new('0028,0008', frames_used))
         expect(dcm.num_frames).to eql frames_used
+      end
+
+    end
+
+
+    describe "#frame_bytes" do
+
+      def encapsulated_object(transfer_syntax)
+        dcm = DObject.new
+        Element.new('0002,0010', transfer_syntax, :parent => dcm)
+        sequence = Sequence.new(PIXEL_TAG, :name => ENCAPSULATED_PIXEL_NAME, :parent => dcm, :vr => 'OB')
+        bot_item = Item.new(:parent => sequence)
+        return dcm, sequence, bot_item
+      end
+
+      def fragment(bot_item, bin, position)
+        Item.new(:bin => bin, :parent => bot_item, :source_position => position)
+      end
+
+      it "assembles cross-fragment frames using Basic Offset Table item-relative offsets" do
+        dcm, sequence, bot_item = encapsulated_object(TXS_JPEG_BASELINE)
+        bot_item.bin = [0, 24].pack('V2')
+        bot_item.source_position = 100
+        frame0_part0 = "\xFF\xD8\x00\xAB".b
+        frame0_part1 = "\xBC\xDE\x00\xAA".b
+        frame1_part0 = "\xFF\xD8\x00\xCD".b
+        frame1_part1 = "\xCD\xEF\x00\xAA".b
+        fragment(bot_item, frame0_part0, 116)
+        fragment(bot_item, frame0_part1, 128)
+        fragment(bot_item, frame1_part0, 140)
+        fragment(bot_item, frame1_part1, 152)
+
+        positions = dcm.send(:fragment_positions, bot_item, bot_item.children)
+        expect(positions).to eql [0, 12, 24, 36]
+        expect(dcm.frame_bytes(0)).to eql(frame0_part0 + frame0_part1)
+        expect(dcm.frame_bytes(1)).to eql(frame1_part0 + frame1_part1)
+        expect(dcm.frame_bytes(2)).to be_nil
+      end
+
+      it "falls back to JPEG frame markers when the Basic Offset Table is empty" do
+        dcm, sequence, bot_item = encapsulated_object(TXS_JPEG_BASELINE)
+        bot_item.source_position = 100
+        fragment(bot_item, "\xFF\xD8\x00\xAB".b, 108)
+        fragment(bot_item, "\xBC\xDE\x00\xAA".b, 120)
+        fragment(bot_item, "\xFF\xD8\x00\xCD".b, 132)
+        fragment(bot_item, "\xCD\xEF\x00\xAA".b, 144)
+
+        expect(dcm.frame_bytes(0)).to eql "\xFF\xD8\x00\xAB\xBC\xDE\x00\xAA".b
+        expect(dcm.frame_bytes(1)).to eql "\xFF\xD8\x00\xCD\xCD\xEF\x00\xAA".b
+      end
+
+      it "does not infer frame boundaries for unsupported empty-BOT transfer syntaxes" do
+        dcm, sequence, bot_item = encapsulated_object(TXS_MPEG2_MP_ML)
+        bot_item.source_position = 100
+        fragment(bot_item, "\x00\x01\x02\x03".b, 108)
+        fragment(bot_item, "\x03\x04".b, 120)
+        fragment(bot_item, "\x00\x01\x02\x03".b, 132)
+
+        expect(dcm.frame_bytes(0)).to be_nil
+      end
+
+      it "does not treat Basic Offset Table sentinel values as an empty table" do
+        dcm, sequence, bot_item = encapsulated_object(TXS_JPEG_BASELINE)
+        bot_item.bin = [0xFFFFFFFF].pack('V')
+        fragment(bot_item, "\xFF\xD8\x00\xAB".b, 108)
+
+        expect(dcm.frame_bytes(0)).to be_nil
+      end
+
+      it "falls back to validated RLE frame headers when the Basic Offset Table is empty" do
+        dcm, sequence, bot_item = encapsulated_object(TXS_RLE)
+        rle_header = [1, 64].pack('V2') + "\x00".b * 56
+        fragment(bot_item, rle_header + "\xAB\xCD".b, 108)
+        fragment(bot_item, "\xEF\x00".b, 184)
+
+        expect(dcm.frame_bytes(0)).to eql(rle_header + "\xAB\xCD\xEF\x00".b)
+      end
+
+      it "uses a large Extended Offset Table through an addressable fake IO and assembles item fragments" do
+        dcm, sequence, bot_item = encapsulated_object(TXS_JPEG_BASELINE)
+        bot_item.source_position = 100
+        fragment(bot_item, 'IGNORED', 108)
+        item_offset = 2 ** 32
+        source_position = item_offset
+        first_header = "\xFE\xFF\x00\xE0".b + [2].pack('V') + 'AB'.b
+        second_header = "\xFE\xFF\x00\xE0".b + [2].pack('V') + 'CD'.b
+        io = AddressableFakeIO.new([
+          [source_position, first_header],
+          [source_position + first_header.bytesize, second_header]
+        ])
+        Element.new(EXTENDED_OFFSET_TABLE_TAG, [item_offset].pack('Q<'), :encoded => true, :parent => dcm, :vr => 'OD')
+        Element.new(EXTENDED_OFFSET_TABLE_LENGTHS_TAG, [4].pack('V'), :encoded => true, :parent => dcm, :vr => 'OL')
+
+        expect(dcm.frame_bytes(0, io)).to eql 'ABCD'.b
+        expect(io.seeks).to eql [source_position]
+      end
+
+      it "parses Extended Offset Table elements after encapsulated Pixel Data" do
+        tag = ->(value) { Stream.new(nil, false).encode_tag(value) }
+        item_header = ->(length) { tag.call(ITEM_TAG) + [length].pack('V') }
+        bot_item_header = tag.call(ITEM_TAG) + [0].pack('V')
+        pixel_data = tag.call(PIXEL_TAG) + 'OB'.b + "\x00\x00".b + [0xFFFFFFFF].pack('V')
+        pixel_data << bot_item_header
+        first_part = 'JP'.b
+        second_part = 'EG'.b
+        pixel_data << item_header.call(first_part.bytesize) + first_part
+        pixel_data << item_header.call(second_part.bytesize) + second_part
+        pixel_data << tag.call(SEQUENCE_DELIMITER) + [0].pack('V')
+        pixel_data << tag.call(EXTENDED_OFFSET_TABLE_TAG) + 'OD'.b + "\x00\x00".b + [8].pack('V') + [20].pack('Q<')
+        pixel_data << tag.call(EXTENDED_OFFSET_TABLE_LENGTHS_TAG) + 'OL'.b + "\x00\x00".b + [4].pack('V') + [4].pack('V')
+        dcm = DObject.parse(pixel_data, :signature => false, :syntax => TXS_JPEG_BASELINE)
+
+        expect(dcm[EXTENDED_OFFSET_TABLE_TAG]).to be_a(Element)
+        expect(dcm.frame_bytes(0)).to eql(first_part + second_part)
+      end
+
+      it "does not fall back when Extended Offset Table lengths are inconsistent" do
+        dcm, sequence, bot_item = encapsulated_object(TXS_JPEG_BASELINE)
+        bot_item.source_position = 100
+        fragment(bot_item, "\xFF\xD8\x00\xAB".b, 108)
+        Element.new(EXTENDED_OFFSET_TABLE_TAG, [8, 24].pack('Q<2'), :encoded => true, :parent => dcm, :vr => 'OD')
+        Element.new(EXTENDED_OFFSET_TABLE_LENGTHS_TAG, [4].pack('V'), :encoded => true, :parent => dcm, :vr => 'OL')
+
+        expect(dcm.frame_bytes(0)).to be_nil
       end
 
     end

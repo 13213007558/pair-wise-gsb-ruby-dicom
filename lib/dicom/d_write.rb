@@ -309,7 +309,7 @@ module DICOM
         # Step 2: Write length
         # Three possible structures for value length here, dependent on data element vr:
         case vr
-          when "OB","OW","OF","SQ","UN","UT"
+          when "OB","OD","OF","OL","OW","SQ","UN","UT"
             if @enc_image # (4 bytes)
               # Item under an encapsulated Pixel Data (7FE0,0010).
               add_encoded(length4)

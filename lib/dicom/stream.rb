@@ -367,7 +367,9 @@ module DICOM
         'FL' => @fs, # Floating point single (4 bytes)
         'FD' => @fd, # Floating point double (8 bytes)
         'OB' => @by, # Other byte string (1-byte integers)
+        'OD' => @qd, # Other double word string (8-byte values)
         'OF' => @fs, # Other float string (4-byte floating point numbers)
+        'OL' => @ul, # Other long string (4-byte integers)
         'OW' => @us, # Other word string (2-byte integers)
         'AT' => @hex, # Tag reference (4 bytes) NB: For tags the spesialized encode_tag/decode_tag methods are used instead of this lookup table.
         'UN' => @hex, # Unknown information (header element is not recognized from local database)
@@ -418,7 +420,9 @@ module DICOM
         'FL' => "\x00",
         'FD' => "\x00",
         'OB' => "\x00",
+        'OD' => "\x00",
         'OF' => "\x00",
+        'OL' => "\x00",
         'OW' => "\x00",
         'SL' => "\x00",
         'SQ' => "\x00",
@@ -442,6 +446,7 @@ module DICOM
         @sl = 'l<*' # Signed long (4 bytes)
         @fs = 'e*' # Floating point single (4 bytes)
         @fd = 'E*' # Floating point double ( 8 bytes)
+        @qd = 'E*' # Other double word string (8-byte floating point numbers)
       else
         # Network (big endian) byte order:
         @us = 'S>*'

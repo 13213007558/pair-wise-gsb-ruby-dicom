@@ -26,6 +26,11 @@ module DICOM
   # Name of encapsulated items.
   PIXEL_ITEM_NAME = "Pixel Data Item"
 
+  # Extended Offset Table.
+  EXTENDED_OFFSET_TABLE_TAG = "7FE0,0001"
+  # Extended Offset Table Lengths.
+  EXTENDED_OFFSET_TABLE_LENGTHS_TAG = "7FE0,0002"
+
   # File meta group.
   META_GROUP = "0002"
 
@@ -127,6 +132,9 @@ module DICOM
   TXS_JPEG_2000_PART2_LOSSLESS          = '1.2.840.10008.1.2.4.92'
   TXS_JPEG_2000_PART2_LOSSLESS_OR_LOSSY = '1.2.840.10008.1.2.4.93'
 
+  TXS_JPEG_HS_LOSSLESS                 = '1.2.840.10008.1.2.4.201'
+  TXS_JPEG_HS_LOSSY                    = '1.2.840.10008.1.2.4.202'
+
   TXS_MPEG2_MP_ML                       = '1.2.840.10008.1.2.4.100'
   TXS_MPEG2_MP_HL                       = '1.2.840.10008.1.2.4.101'
 
@@ -186,6 +194,8 @@ module DICOM
     'UL' => :to_i,
     'SL' => :to_i,
     'OB' => :to_i,
+    'OD' => :to_f,
+    'OL' => :to_i,
     'OW' => :to_i,
     'OF' => :to_f,
     'FL' => :to_f,
@@ -210,4 +220,3 @@ module DICOM
   VALUE_CONVERSION.default = :to_s
 
 end
-

@@ -13,7 +13,7 @@ module DICOM
     include ElementalParent
 
     # The index of this Item in the group of items belonging to its parent. If the Item is without parent, index is nil.
-    attr_accessor :index
+    attr_accessor :index, :source_position
 
     # Creates an Item instance.
     #
@@ -24,9 +24,10 @@ module DICOM
     # @param [Hash] options the options to use for creating the item
     # @option options [String] :bin a binary string to be carried by the item
     # @option options [String] :indexif the item is to be inserted at a specific index (Item number), this option parameter needs to set
-    # @option options [String] :length theiItem length (which either refers to the length of the encoded string of children of this item, or the length of its binary data)
+    # @option options [Integer] :length the item length (which either refers to the length of the encoded string of children of this item, or the length of its binary data)
     # @option options [String] :name the name of the item may be specified upon creation  (if not, a default name is used)
     # @option options [String] :parent a Sequence or DObject instance which the item instance shall belong to
+    # @option options [Integer] :source_position the byte position of the item tag in the source DICOM byte stream
     # @option options [String] :vr the value representation of the item may be specified upon creation (if not, a default vr is used)
     #
     # @example Create an empty Item and connect it to the "Structure Set ROI Sequence"
@@ -42,6 +43,7 @@ module DICOM
       @value = nil
       @name = options[:name] || "Item"
       @vr = options[:vr] || ITEM_VR
+      @source_position = options[:source_position]
       if options[:bin]
         self.bin = options[:bin]
       else

@@ -4142,6 +4142,8 @@
 7FE0,0008	Float Pixel Data	OF	1	
 7FE0,0009	Double Float Pixel Data	OD	1	
 7FE0,0010	Pixel Data	OB,OW	1	
+7FE0,0001	Extended Offset Table	OD	1	
+7FE0,0002	Extended Offset Table Lengths	OL	1	
 7FE0,0020	Coefficients SDVN	OW	1	R
 7FE0,0030	Coefficients SDHN	OW	1	R
 7FE0,0040	Coefficients SDDN	OW	1	R

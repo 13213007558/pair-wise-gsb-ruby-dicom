@@ -140,7 +140,8 @@ module DICOM
         elsif tag == ITEM_TAG
           # Create an Item:
           if @enc_image
-            @current_element = Item.new(:bin => bin, :length => length, :name => name, :parent => @current_parent, :vr => vr)
+            item_position = @stream.index - (length > 0 ? length + 8 : 8)
+            @current_element = Item.new(:bin => bin, :length => length, :name => name, :parent => @current_parent, :source_position => item_position, :vr => vr)
           else
             @current_element = Item.new(:length => length, :name => name, :parent => @current_parent, :vr => vr)
           end
@@ -164,6 +165,14 @@ module DICOM
         # We do not create an element for the delimiter items.
         # The occurance of such a tag indicates that a sequence or item has ended, and the parent must be changed:
         @current_parent = @current_parent.parent
+        if tag == SEQUENCE_DELIMITER && @current_parent.respond_to?(:tag)
+          if @current_parent.tag == PIXEL_TAG
+            @current_parent = @current_parent.parent
+          elsif @current_parent.tag == ITEM_TAG && @current_parent.parent.respond_to?(:tag) && @current_parent.parent.tag == PIXEL_TAG
+            @current_parent = @current_parent.parent.parent
+          end
+          @enc_image = false
+        end
       else
         check_duplicate(tag, 'Element')
         unless @current_parent[tag] and !@overwrite
@@ -298,7 +307,7 @@ module DICOM
     # @return [String, NilClass] the data element value
     #
     def read_value(vr, length)
-      unless vr == "OW" or vr == "OB" or vr == "OF" or vr == "UN"
+      unless vr == "OW" or vr == "OB" or vr == "OD" or vr == "OF" or vr == "OL" or vr == "UN"
         # Since the binary string has already been extracted for this data element, we must first "rewind":
         @stream.skip(-length)
         # Decode data:
@@ -331,7 +340,7 @@ module DICOM
         # Step 2: Read length
         # Three possible structures for value length here, dependent on element vr:
         case vr
-          when "OB","OW","OF","SQ","UN","UT"
+          when "OB","OD","OF","OL","OW","SQ","UN","UT"
             # 6 bytes total (2 reserved bytes preceeding the 4 byte value length)
             reserved = 2
             bytes = 4
