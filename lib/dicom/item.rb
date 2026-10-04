@@ -38,7 +38,7 @@ module DICOM
       # Set common parent variables:
       initialize_parent
       # Set instance variables:
-      @tag = ITEM_TAG
+      @tag = options[:tag] || ITEM_TAG
       @value = nil
       @name = options[:name] || "Item"
       @vr = options[:vr] || ITEM_VR

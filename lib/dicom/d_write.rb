@@ -302,16 +302,17 @@ module DICOM
       # *****EXPLICIT*****:
       if @explicit == true
         # Step 1: Write VR (if it is to be written)
-        unless ITEM_TAGS.include?(tag)
+        unless ITEM_TAGS.include?(tag) or tag == EXTENDED_OFFSET_TABLE_TAG
           # Write data element VR (2 bytes - since we are not dealing with an item related element):
           add_encoded(@stream.encode(vr, "STR"))
         end
+        vr = ITEM_VR if tag == EXTENDED_OFFSET_TABLE_TAG
         # Step 2: Write length
         # Three possible structures for value length here, dependent on data element vr:
         case vr
           when "OB","OW","OF","SQ","UN","UT"
             if @enc_image # (4 bytes)
-              # Item under an encapsulated Pixel Data (7FE0,0010).
+              # Item or Extended Offset Table Item under an encapsulated Pixel Data (7FE0,0010).
               add_encoded(length4)
             else # (6 bytes total)
               # Two reserved bytes first:
@@ -320,7 +321,7 @@ module DICOM
               add_encoded(length4)
             end
           when ITEM_VR # (4 bytes)
-            # For the item elements: "FFFE,E000", "FFFE,E00D" and "FFFE,E0DD"
+            # For the item elements, including the Extended Offset Table
             add_encoded(length4)
           else # (2 bytes)
             # For all the other data element vr, value length is 2 bytes:

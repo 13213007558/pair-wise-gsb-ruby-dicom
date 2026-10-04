@@ -234,9 +234,68 @@ module DICOM
         end
       elsif pixel_element.is_a?(Sequence)
         pixel_items = pixel_element.children.first.children
-        pixel_items.each {|item| strings << item.bin}
+        pixel_items.each do |item|
+          strings << item.bin if item.tag == ITEM_TAG
+        end
       end
       return strings
+    end
+
+    # Returns the encoded bytes of one encapsulated frame without decoding pixels.
+    #
+    # Frame locations are resolved from the Basic Offset Table first, and then
+    # the Extended Offset Table when the Basic Offset Table is empty. Fragments
+    # belonging to the requested frame are concatenated, including frames that
+    # span more than one Item. Returns nil when a frame boundary cannot be
+    # reliably located.
+    #
+    # @param [Integer] index zero-based frame index
+    # @param [Hash] options the options to use for locating the frame
+    # @option options [IO] :io a seekable IO positioned at the encapsulated Pixel Data value, or combined with :position
+    # @option options [Integer] :position absolute IO position of the encapsulated Pixel Data value
+    # @return [String, NilClass] the encoded frame bytes, or nil if the frame cannot be located
+    #
+    def frame_bytes(index, options={})
+      if index.is_a?(Hash)
+        options = index
+        index = options[:index]
+      elsif options.respond_to?(:seek) && options.respond_to?(:read)
+        options = { :io => options }
+      end
+      index ||= 0
+      raise ArgumentError, "Expected Integer frame index, got #{index.class}." unless index.is_a?(Integer)
+      return nil if index < 0
+
+      pixel_element = self[PIXEL_TAG]
+      return nil unless pixel_element.is_a?(Sequence)
+
+      io = options[:io]
+      original_io_position = io.pos if io && io.respond_to?(:pos)
+      if io
+        begin
+          return encapsulated_frame_bytes_from_io(index, io, options[:position])
+        ensure
+          io.seek(original_io_position) unless original_io_position.nil?
+        end
+      else
+        bot_bin, eot_bin, fragments = encapsulated_pixel_items(pixel_element)
+        fragments = encapsulated_memory_fragments(fragments)
+      end
+      return nil if fragments.nil? || fragments.empty?
+
+      offsets = offsets_from_encapsulated_tables(bot_bin, eot_bin)
+      if offsets == false
+        ranges = nil
+      elsif offsets
+        ranges = frame_ranges_from_offsets(offsets, fragments, io.nil?)
+      else
+        ranges = frame_ranges_without_offsets(fragments, io)
+      end
+      return nil unless ranges && index < ranges.length
+
+      selected_fragments, byte_length = ranges[index]
+      return nil unless selected_fragments && byte_length
+      encapsulated_fragment_bytes(selected_fragments, nil)
     end
 
     # Dumps the binary content of the Pixel Data element to the specified file.
@@ -451,6 +510,307 @@ module DICOM
 
     private
 
+    # Builds the byte stream represented by the selected encapsulated fragments.
+    #
+    def encapsulated_fragment_bytes(fragments, io)
+      bytes = "".b
+      fragments.each do |fragment|
+        if io
+          return nil unless fragment[:length]
+          chunk = read_io_bytes(io, fragment[:base_position] + fragment[:payload_position], fragment[:length])
+          return nil unless chunk && chunk.bytesize == fragment[:length]
+          bytes << chunk
+        else
+          return nil unless fragment[:bin]
+          bytes << fragment[:bin].b
+        end
+      end
+      bytes
+    end
+
+    # Locates and reads one frame from a seekable encapsulated Pixel Data IO.
+    #
+    def encapsulated_frame_bytes_from_io(index, io, supplied_position)
+      return nil unless io.respond_to?(:seek) && io.respond_to?(:read)
+      base_position = supplied_position || (io.respond_to?(:pos) ? io.pos : 0)
+      bot_header = encapsulated_io_item_header(io, base_position)
+      return nil unless bot_header && bot_header[:tag] == ITEM_TAG && bot_header[:length].even?
+      bot_bin = if bot_header[:length] == 0
+        "".b
+      else
+        read_io_bytes(io, base_position + 8, bot_header[:length])
+      end
+      return nil unless bot_bin && bot_bin.bytesize == bot_header[:length]
+
+      table_position = base_position + 8 + bot_header[:length]
+      next_header = encapsulated_io_item_header(io, table_position)
+      first_fragment_position = table_position
+      eot_bin = nil
+      if next_header && next_header[:tag] == EXTENDED_OFFSET_TABLE_TAG
+        return nil unless next_header[:length] >= 4 && next_header[:length].even?
+        eot_bin = read_io_bytes(io, table_position + 8, next_header[:length])
+        return nil unless eot_bin && eot_bin.bytesize == next_header[:length]
+        first_fragment_position = table_position + 8 + next_header[:length]
+      end
+
+      offsets = offsets_from_encapsulated_tables(bot_bin, eot_bin)
+      if offsets.is_a?(Array) && !offsets.empty?
+        return nil unless index >= 0 && index < offsets.length
+        position = first_fragment_position + offsets[index]
+        end_offset = offsets[index + 1]
+        end_position = end_offset ? first_fragment_position + end_offset : nil
+        encapsulated_io_frame_at(io, position, end_position)
+      else
+        return nil if offsets == false
+        fragments = encapsulated_io_fragments_sequential(io, first_fragment_position)
+        starts = starts_from_encoded_markers(fragments, io)
+        ranges = frame_ranges_from_offsets(starts, fragments, true)
+        return nil unless ranges && index < ranges.length
+        encapsulated_fragment_bytes(ranges[index].first, io)
+      end
+
+    end
+
+    # Reads contiguous fragments for one table-located frame.
+    #
+    def encapsulated_io_frame_at(io, position, end_position)
+      fragments = Array.new
+      loop do
+        header = encapsulated_io_item_header(io, position)
+        break if [ITEM_DELIMITER, SEQUENCE_DELIMITER].include?(header && header[:tag])
+        return nil unless header && header[:tag] == ITEM_TAG && header[:length] && header[:length] >= 0 && header[:length].even?
+        if end_position
+          return nil if position >= end_position
+          return nil if position + 8 + header[:length] > end_position
+        end
+        fragments << {
+          :base_position => 0,
+          :position => position,
+          :payload_position => position + 8,
+          :length => header[:length]
+        }
+        position += 8 + header[:length]
+        break if position == end_position
+      end
+      return nil if fragments.empty?
+      return nil if end_position && position != end_position
+      encapsulated_fragment_bytes(fragments, io)
+    end
+
+    # Reads and decodes one encapsulated Item header from an absolute IO position.
+    #
+    def encapsulated_io_item_header(io, position)
+      header = read_io_bytes(io, position, 8)
+      return nil unless header && header.bytesize == 8
+      group, element = header.unpack('v2')
+      tag = format("%04X,%04X", group, element)
+      length = header[4, 4].unpack('V')[0]
+      { :tag => tag, :length => length }
+    end
+
+    # Reads fragments sequentially for transfer syntaxes that support empty-table frame detection.
+    #
+    def encapsulated_io_fragments_sequential(io, first_fragment_absolute_position)
+      fragments = Array.new
+      position = first_fragment_absolute_position
+      loop do
+        header = encapsulated_io_item_header(io, position)
+        break unless header
+        break if [ITEM_DELIMITER, SEQUENCE_DELIMITER].include?(header[:tag])
+        return nil unless header[:tag] == ITEM_TAG && header[:length] && header[:length] >= 0 && header[:length].even?
+        relative_position = position - first_fragment_absolute_position
+        fragments << {
+          :base_position => first_fragment_absolute_position,
+          :position => relative_position,
+          :payload_position => relative_position + 8,
+          :length => header[:length]
+        }
+        position += 8 + header[:length]
+      end
+      fragments
+    end
+
+    # Extracts the BOT, EOT and pixel fragment Items of an encapsulated Pixel Data Sequence.
+    #
+    def encapsulated_pixel_items(pixel_element)
+      immediate_items = pixel_element.children.select { |child| child.is_a?(Item) }
+      container = immediate_items.first
+      if container && container.tag == ITEM_TAG && (container.name == 'Item' || container.children.any? { |child| child.is_a?(Item) })
+        # Standard parsed encapsulated pixel data stores the BOT Item first and fragment Items as its children.
+      else
+        container = nil
+      end
+
+      if container
+        candidates = immediate_items + container.children.select { |child| child.is_a?(Item) }
+        eot_item = candidates.find { |item| item.tag == EXTENDED_OFFSET_TABLE_TAG }
+        fragments = container.children.select do |item|
+          item.is_a?(Item) && item.tag == ITEM_TAG
+        end
+        [container.bin || "".b, eot_item && eot_item.bin, fragments]
+      else
+        eot_item = immediate_items.find { |item| item.tag == EXTENDED_OFFSET_TABLE_TAG }
+        fragments = immediate_items.select { |item| item.tag == ITEM_TAG }
+        bot_item = eot_item ? fragments.first : nil
+        fragments = fragments - [bot_item] if bot_item
+        [nil, eot_item && eot_item.bin, fragments]
+      end
+    end
+
+    # Converts parsed pixel fragment Items to positions relative to the first fragment Item header.
+    #
+    def encapsulated_memory_fragments(items)
+      fragments = Array.new
+      position = 0
+      items.each do |item|
+        return nil unless item.length && item.length >= 0 && item.length.even?
+        fragments << {
+          :base_position => 0,
+          :position => position,
+          :payload_position => position + 8,
+          :length => item.length,
+          :bin => item.bin
+        }
+        position += 8 + item.length
+      end
+      fragments
+    end
+
+    # Returns offset entries from BOT/EOT, an empty array for empty tables, or false for an invalid table.
+    #
+    def offsets_from_encapsulated_tables(bot_bin, eot_bin)
+      unless bot_bin.nil?
+        offsets = basic_offset_table_entries(bot_bin)
+        return offsets if offsets && offsets.length > 0
+        return false if offsets == false
+      end
+      if eot_bin
+        extended_offset_table_entries(eot_bin)
+      else
+        nil
+      end
+    end
+
+    # Parses a Basic Offset Table containing unsigned 32-bit little endian offsets.
+    #
+    def basic_offset_table_entries(bin)
+      return false unless bin.bytesize % 4 == 0
+      bin.unpack('V*')
+    end
+
+    # Parses an Extended Offset Table containing 64-bit offsets as low/high unsigned 32-bit words.
+    #
+    def extended_offset_table_entries(bin)
+      return false unless bin.bytesize >= 4 && (bin.bytesize - 4) % 8 == 0
+      count = bin[0, 4].unpack('V')[0]
+      return false unless bin.bytesize == 4 + count * 8
+      entries = Array.new
+      count.times do |i|
+        low, high = bin[4 + i * 8, 8].unpack('V2')
+        entries << low + (high * (2 ** 32))
+      end
+      entries
+    end
+
+    # Groups fragments according to validated offset table entries.
+    #
+    def frame_ranges_from_offsets(offsets, fragments, validate_contiguity)
+      return nil unless offsets.is_a?(Array) && offsets.length > 0
+      return nil unless offsets.first == 0
+      return nil unless offsets == offsets.sort
+      return nil unless offsets.uniq.length == offsets.length
+      positions = fragments.map { |fragment| fragment[:position] }
+      return nil unless offsets.all? { |offset| positions.include?(offset) }
+
+      ranges = Array.new
+      offsets.each_with_index do |start, index|
+        end_position = offsets[index + 1]
+        selected_fragments = fragments.select { |fragment| fragment[:position] >= start && (!end_position || fragment[:position] < end_position) }
+        end_position ||= selected_fragments.last[:position] + 8 + selected_fragments.last[:length].to_i
+        return nil if selected_fragments.empty?
+        return nil unless selected_fragments.first[:position] == start
+        total_length = selected_fragments.inject(0) { |sum, fragment| sum + 8 + fragment[:length].to_i }
+        return nil if validate_contiguity && total_length != end_position - start
+        ranges << [selected_fragments, total_length]
+      end
+      ranges
+    end
+
+    # Locates frames without an offset table only when boundaries are reliably known.
+    #
+    def frame_ranges_without_offsets(fragments, io)
+      starts = if num_frames == 1
+        [0]
+      else
+        starts_from_encoded_markers(fragments, io)
+      end
+      return nil unless starts && starts.length == num_frames
+      frame_ranges_from_offsets(starts, fragments, true)
+    end
+
+    # Finds frame starts at fragment boundaries for encoded streams with reliable start markers.
+    #
+    def starts_from_encoded_markers(fragments, io)
+      marker = encoded_frame_start_marker
+      return nil unless marker
+      starts = Array.new
+      fragments.each_with_index do |fragment, index|
+        prefix = if io
+          read_encoded_prefix_from_io(io, fragments, index, marker.bytesize)
+        else
+          read_encoded_prefix_from_memory(fragments, index, marker.bytesize)
+        end
+        starts << fragment[:position] if prefix && prefix[0, marker.bytesize] == marker
+      end
+      starts
+    end
+
+    # Returns the frame start marker for transfer syntaxes whose boundaries can be identified without an offset table.
+    #
+    def encoded_frame_start_marker
+      syntax = respond_to?(:transfer_syntax) ? transfer_syntax : (top_parent.respond_to?(:transfer_syntax) ? top_parent.transfer_syntax : nil)
+      return nil unless syntax
+      code = syntax.split('.').last.to_i
+      if (50..70).include?(code) || (80..81).include?(code)
+        "\xFF\xD8".b
+      elsif (90..93).include?(code)
+        "\xFF\x4F\xFF\x51".b
+      end
+    end
+
+    # Reads the beginning of a frame across short in-memory fragments.
+    #
+    def read_encoded_prefix_from_memory(fragments, index, length)
+      prefix = "".b
+      while index < fragments.length && prefix.bytesize < length
+        prefix << fragments[index][:bin].to_s.b
+        index += 1
+      end
+      prefix[0, length]
+    end
+
+    # Reads the beginning of a frame across short fragments in a seekable IO.
+    #
+    def read_encoded_prefix_from_io(io, fragments, index, length)
+      prefix = "".b
+      while index < fragments.length && prefix.bytesize < length
+        fragment = fragments[index]
+        wanted = [fragment[:length], length - prefix.bytesize].min
+        chunk = read_io_bytes(io, fragment[:base_position] + fragment[:payload_position], wanted)
+        return nil unless chunk
+        prefix << chunk
+        index += 1
+      end
+      prefix[0, length]
+    end
+
+    # Reads an exact byte range from an IO.
+    #
+    def read_io_bytes(io, position, length)
+      io.seek(position, IO::SEEK_SET)
+      bytes = io.read(length)
+      bytes && bytes.b
+    end
 
     # Gives the effective bit depth of the pixel data (considers a special case
     # for Palette colored images).

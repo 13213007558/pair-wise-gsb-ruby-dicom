@@ -91,19 +91,20 @@ module DICOM
       # STEP 4:
       # Reading value of data element.
       # Special handling needed for items in encapsulated image data:
-      if @enc_image and tag == ITEM_TAG
-        # The first item appearing after the image element is a 'normal' item, the rest hold image data.
-        # Note that the first item will contain data if there are multiple images, and so must be read.
+      if @enc_image and (tag == ITEM_TAG or tag == EXTENDED_OFFSET_TABLE_TAG)
+        # Item elements under encapsulated pixel data use item headers and carry binary values.
         vr = "OW" # how about alternatives like OB?
         # Modify name of item if this is an item that holds pixel data:
-        if @current_element.tag != PIXEL_TAG
+        if tag == EXTENDED_OFFSET_TABLE_TAG
+          name = "Extended Offset Table"
+        elsif @current_element.tag != PIXEL_TAG
           name = PIXEL_ITEM_NAME
         end
       end
       # Read the binary string of the element:
       bin = read_bin(length) if length > 0
       # Read the value of the element (if it contains data, and it is not a sequence or ordinary item):
-      if length > 0 and vr != "SQ" and tag != ITEM_TAG
+      if length > 0 and vr != "SQ" and tag != ITEM_TAG and tag != EXTENDED_OFFSET_TABLE_TAG
         # Read the element's processed value:
         value = read_value(vr, length)
       else
@@ -119,7 +120,7 @@ module DICOM
       end
       # Create an Element from the gathered data:
       # if vr is UN ("unknown") and length is -1, treat as a sequence (sec. 6.2.2 of DICOM standard)
-      if level_vr == "SQ" or tag == ITEM_TAG or (level_vr == "UN" and length == -1)
+      if level_vr == "SQ" or tag == ITEM_TAG or tag == EXTENDED_OFFSET_TABLE_TAG or (level_vr == "UN" and length == -1)
         if level_vr == "SQ" or (level_vr == "UN" and length == -1)
           check_duplicate(tag, 'Sequence')
           # If we get an unknown sequence with undefined length, we must switch to implicit for decoding its content:
@@ -137,21 +138,21 @@ module DICOM
             @current_element = Sequence.new(tag, :length => length, :name => name, :vr => vr)
             @current_element.set_parent(@current_parent)
           end
-        elsif tag == ITEM_TAG
+        elsif tag == ITEM_TAG or tag == EXTENDED_OFFSET_TABLE_TAG
           # Create an Item:
           if @enc_image
-            @current_element = Item.new(:bin => bin, :length => length, :name => name, :parent => @current_parent, :vr => vr)
+            @current_element = Item.new(:bin => bin, :length => length, :name => name, :parent => @current_parent, :tag => tag, :vr => vr)
           else
             @current_element = Item.new(:length => length, :name => name, :parent => @current_parent, :vr => vr)
           end
         end
         # Common operations on the two types of parent elements:
-        if length == 0 and @enc_image
+        if length == 0 and @enc_image and tag == ITEM_TAG
           # Set as parent. Exceptions when parent will not be set:
           # Item/Sequence has zero length & Item is a pixel item (which contains pixels, not child elements).
           @current_parent = @current_element
         elsif length != 0
-          @current_parent = @current_element unless name == PIXEL_ITEM_NAME
+          @current_parent = @current_element unless name == PIXEL_ITEM_NAME or tag == EXTENDED_OFFSET_TABLE_TAG
         end
         # If length is specified (no delimitation items), load a new DRead instance to read these child elements
         # and load them into the current sequence. The exception is when we have a pixel data item.
@@ -327,7 +328,8 @@ module DICOM
       # *****EXPLICIT*****:
       if @explicit == true
         # Step 1: Read VR, 2 bytes (if it exists - which are all cases except for the item related elements)
-        vr = @stream.decode(2, "STR") unless ITEM_TAGS.include?(tag)
+        vr = @stream.decode(2, "STR") unless ITEM_TAGS.include?(tag) or tag == EXTENDED_OFFSET_TABLE_TAG
+        vr = ITEM_VR if tag == EXTENDED_OFFSET_TABLE_TAG
         # Step 2: Read length
         # Three possible structures for value length here, dependent on element vr:
         case vr

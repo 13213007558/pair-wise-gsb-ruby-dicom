@@ -130,6 +130,132 @@ module DICOM
 
     end
 
+    describe "#frame_bytes" do
+
+      def encapsulated_dcm(bot_entries, fragment_payloads, options={})
+        syntax = options[:syntax] || TXS_JPEG_BASELINE
+        syntax_value = (syntax + (syntax.length.odd? ? "\x00" : "")).b
+        transfer_syntax = "\x02\x00\x10\x00UI".b + [syntax_value.length].pack('v') + syntax_value
+        dataset = transfer_syntax.b
+        if options[:frames]
+          frames = options[:frames].to_s
+          frames << " " if frames.length.odd?
+          dataset << "\x28\x00\x08\x00CS".b + [frames.length].pack('v') + frames.b
+        end
+        dataset << "\xE0\x7F\x10\x00OB\x00\x00".b + [-1].pack('V')
+        dataset << item(ITEM_TAG, bot_entries ? bot_entries.pack('V*') : "".b)
+        if options[:eot_entries]
+          entries = options[:eot_entries]
+          eot_bin = [entries.length].pack('V')
+          entries.each do |offset|
+            eot_bin << [offset % (2 ** 32), offset / (2 ** 32)].pack('V2')
+          end
+          dataset << item(EXTENDED_OFFSET_TABLE_TAG, eot_bin)
+        end
+        fragment_payloads.each { |payload| dataset << item(ITEM_TAG, payload) }
+        dataset << "\xFE\xFF\xDD\xE0".b + [0].pack('V')
+        DObject.parse(dataset, :signature => false)
+      end
+
+      def item(tag, payload)
+        tag_bytes = case tag
+          when EXTENDED_OFFSET_TABLE_TAG then "\xFE\xFF\x01\xE0".b
+          else "\xFE\xFF\x00\xE0".b
+        end
+        tag_bytes + [payload.bytesize].pack('V') + payload
+      end
+
+      class AddressableFakeIO
+
+        attr_reader :pos, :reads
+
+        def initialize
+          @bytes = Hash.new
+          @pos = 0
+          @reads = Array.new
+        end
+
+        def add(position, bytes)
+          bytes.each_byte.with_index { |byte, index| @bytes[position + index] = byte }
+        end
+
+        def seek(position, whence=IO::SEEK_SET)
+          @pos = case whence
+            when IO::SEEK_SET then position
+            when IO::SEEK_CUR then @pos + position
+            when IO::SEEK_END then @bytes.keys.max + 1 + position
+          end
+          0
+        end
+
+        def read(length)
+          values = Array.new(length) { |index| @bytes[@pos + index] }
+          return nil if values.include?(nil)
+          @reads << [@pos, length]
+          bytes = values.pack('C*')
+          @pos += length
+          bytes
+        end
+
+      end
+
+      it "assembles a frame across fragments using BOT offsets relative to Item headers" do
+        dcm = encapsulated_dcm([0, 20], ["ab".b, "cd".b, "ef".b], :frames => 2)
+        expect(dcm.frame_bytes(0)).to eql "abcd".b
+        expect(dcm.frame_bytes(1)).to eql "ef".b
+      end
+
+      it "uses the 64-bit Extended Offset Table when the BOT is empty" do
+        dcm = encapsulated_dcm([], ["AA".b, "BB".b], {
+          :frames => 2,
+          :eot_entries => [0, 10]
+        })
+        expect(dcm.frame_bytes(0)).to eql "AA".b
+        expect(dcm.frame_bytes(1)).to eql "BB".b
+      end
+
+      it "identifies JPEG 2000 frame markers split across short fragments when the BOT is empty" do
+        fragments = [
+          "\xFF\x4F".b,
+          "\xFF\x51\xAA\xBB".b,
+          "\xFF\x4F\xFF\x51\xCC\xDD".b
+        ]
+        dcm = encapsulated_dcm([], fragments, :syntax => TXS_JPEG_2000_PART1_LOSSLESS, :frames => 2)
+        expect(dcm.frame_bytes(0)).to eql (fragments[0] + fragments[1])
+        expect(dcm.frame_bytes(1)).to eql fragments[2]
+      end
+
+      it "does not guess fragment boundaries for a transfer syntax without recognizable frame starts" do
+        dcm = encapsulated_dcm([], ["\x00\x01".b, "\x02\x03".b], {
+          :syntax => TXS_RLE,
+          :frames => 2
+        })
+        expect(dcm.frame_bytes(0)).to be_nil
+        expect(dcm.frame_bytes(1)).to be_nil
+      end
+
+      it "reads only requested fragments from addressable IO using a large EOT offset" do
+        base_position = 1000
+        large_offset = (2 ** 32) + 2
+        dcm = encapsulated_dcm([], ["AA".b, "BB".b], :frames => 2)
+        io = AddressableFakeIO.new
+        io.add(base_position, "\xFE\xFF\x00\xE0".b + [0].pack('V'))
+        io.add(base_position + 8, "\xFE\xFF\x01\xE0".b + [20].pack('V'))
+        io.add(base_position + 16, [2].pack('V') + [0, 0, large_offset % (2 ** 32), large_offset / (2 ** 32)].pack('V4'))
+        io.add(base_position + 36, "\xFE\xFF\x00\xE0".b + [2].pack('V') + "AA".b)
+        second_frame_position = base_position + 36 + large_offset
+        io.add(second_frame_position, "\xFE\xFF\x00\xE0".b + [2].pack('V') + "BB".b)
+        io.add(second_frame_position + 10, "\xFE\xFF\xDD\xE0".b + [0].pack('V'))
+        io.seek(123)
+
+        expect(dcm.frame_bytes(1, :io => io, :position => base_position)).to eql "BB".b
+        expect(io.pos).to eql 123
+        expect(io.reads).to include([second_frame_position + 8, 2])
+        expect(io.reads).not_to include([base_position + 52, 2])
+      end
+
+    end
+
 
     describe "#decode_pixels" do
 

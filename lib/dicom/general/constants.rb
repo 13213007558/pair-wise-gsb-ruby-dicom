@@ -7,6 +7,8 @@ module DICOM
 
   # Item tag.
   ITEM_TAG = "FFFE,E000"
+  # Extended Offset Table tag.
+  EXTENDED_OFFSET_TABLE_TAG = "FFFE,E001"
   # All Item related tags (includes both types of delimitation items).
   ITEM_TAGS = ["FFFE,E000", "FFFE,E00D", "FFFE,E0DD"]
   # Item delimiter tag.
