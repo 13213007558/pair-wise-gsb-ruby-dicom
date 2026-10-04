@@ -56,6 +56,17 @@ communication modalities like querying, moving, sending and receiving files.
     # Convert the data element hierarchy to a nested hash:
     dcm.to_hash
 
+### Inspect frames of an enhanced multi-frame object
+
+    # Get a view of a single frame (no pixel decoding required):
+    view = dcm.frame_view(0)
+    # The functional groups applying to this frame (shared + per-frame):
+    view.functional_group_tags
+    # Where a functional group is defined (:shared or :per_frame):
+    view.source('0020,9113')
+    # The frame's Dimension Index coordinates:
+    view.dimension_coordinates
+
 ### Handle pixel data
 
     # Retrieve the pixel data in a Ruby Array:
