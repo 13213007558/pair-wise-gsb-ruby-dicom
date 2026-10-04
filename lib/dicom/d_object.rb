@@ -42,6 +42,10 @@ module DICOM
     alias_method :read?, :read_success
     alias_method :written?, :write_success
 
+    def sr_content_graph
+      SRContentGraph.new(self)
+    end
+
     # Creates a DObject instance by downloading a DICOM file
     # specified by a hyperlink, and parsing the retrieved file.
     #
