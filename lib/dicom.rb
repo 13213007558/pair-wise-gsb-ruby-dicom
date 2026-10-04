@@ -48,6 +48,8 @@ require_relative 'dicom/item'
 require_relative 'dicom/link'
 require_relative 'dicom/sequence'
 require_relative 'dicom/stream'
+# Extensions (palette color lookup tables):
+require_relative 'dicom/segmented_palette_lut'
 # Dictionary:
 require_relative 'dicom/d_library'
 require_relative 'dicom/dictionary_element'
