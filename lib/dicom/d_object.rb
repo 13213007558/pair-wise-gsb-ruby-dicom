@@ -234,6 +234,45 @@ module DICOM
       encode_in_segments(max_size, :syntax => transfer_syntax)
     end
 
+    # Builds a validated view of the Enhanced Multi-frame functional groups.
+    #
+    # @return [EnhancedMultiFrame] the frame collection
+    #
+    def enhanced_multi_frame
+      EnhancedMultiFrame.new(self)
+    end
+
+    alias_method :enhanced_multiframe, :enhanced_multi_frame
+
+    # Checks whether this data set contains Enhanced Multi-frame functional groups.
+    #
+    # @return [Boolean] true if a shared or per-frame functional groups sequence exists
+    #
+    def enhanced_multi_frame?
+      exists?(PER_FRAME_FUNCTIONAL_GROUPS_TAG) || exists?(SHARED_FUNCTIONAL_GROUPS_TAG)
+    end
+
+    alias_method :enhanced_multiframe?, :enhanced_multi_frame?
+
+    # Returns one validated view for each Enhanced Multi-frame frame.
+    #
+    # @return [Array<FrameView>] the validated frame views
+    #
+    def frame_views
+      enhanced_multi_frame.to_a
+    end
+
+    alias_method :enhanced_frames, :frame_views
+
+    # Returns the validated view for one Enhanced Multi-frame frame.
+    #
+    # @param [Integer] index a zero-based frame index
+    # @return [FrameView] the requested frame view
+    #
+    def frame_view(index)
+      enhanced_multi_frame.frame(index)
+    end
+
     # Computes a hash code for this object.
     #
     # @note Two objects with the same attributes will have the same hash code.
