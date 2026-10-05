@@ -5,6 +5,7 @@
 # * Element, Sequence, Item, Parent, Elemental - users who wish to interact with
 #   their DICOM objects will use these classes/modules.
 # * ImageItem - Image related methods are found in this class.
+# * Segmentation - a structured interface to DICOM Segmentation objects.
 # * DClient - for client side network communication, like querying, moving & sending DICOM files.
 # * DServer - for server side network communication: Setting up your own DICOM storage node (SCP).
 # * Anonymizer - a convenience class for anonymizing your DICOM files.
@@ -59,6 +60,7 @@ require_relative 'dicom/image_processor_r_magick'
 # Extensions (non-core functionality):
 require_relative 'dicom/anonymizer'
 require_relative 'dicom/audit_trail'
+require_relative 'dicom/segmentation'
 
 
 module DICOM
