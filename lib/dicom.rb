@@ -59,6 +59,8 @@ require_relative 'dicom/image_processor_r_magick'
 # Extensions (non-core functionality):
 require_relative 'dicom/anonymizer'
 require_relative 'dicom/audit_trail'
+require_relative 'dicom/segmentation_frame'
+require_relative 'dicom/segmentation'
 
 
 module DICOM
